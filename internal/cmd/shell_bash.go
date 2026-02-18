@@ -1,6 +1,9 @@
 package cmd
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type bash struct{}
 
@@ -10,7 +13,18 @@ var Bash Shell = bash{}
 const bashHook = `
 _direnv_hook() {
   local previous_exit_status=$?;
-  vars="$("{{.SelfPath}}" export bash)";
+
+	# t_exec, t_subshell
+	#
+	# We assume that if DIRENV_STATE is set, then we're in a direnv envrionment. 
+	# So if our process marker isn't set and DIRENV_STATE is, then the user must 
+	# have used exec or started a subshell.
+	if [[ ! -v _direnv_loaded ]] && [[ -v DIRENV_STATE ]]; then
+		vars="$("{{.SelfPath}}" export bash --type new_shell)"
+	else
+		vars="$("{{.SelfPath}}" export bash)"
+	fi
+
   trap -- '' SIGINT;
   eval "$vars";
   trap - SIGINT;
@@ -23,10 +37,80 @@ if [[ ";${PROMPT_COMMAND[*]:-};" != *";_direnv_hook;"* ]]; then
     PROMPT_COMMAND="_direnv_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   fi
 fi
+
+# t_exit
+function __direnv_exit {
+	vars="$("{{.SelfPath}}" export bash --type exit)"
+	trap -- '' SIGINT
+	eval "$vars"
+	trap - SIGINT
+}
+direnv_exit_trap='__direnv_exit'
+# 'trap -p EXIT' will print 'trap -- <current_trap> EXIT'. The output seems to be
+# formatted the way the %q directive for printf formats variables[1]. Because of
+# this, we can use eval to tokenize it.
+#
+# [1]: https://www.gnu.org/software/coreutils/manual/html_node/printf-invocation.html#printf-invocation
+trap_output="$(trap -p EXIT)"
+if [[ -n "$trap_output" ]]; then
+	eval "local -ra trap_output_tokens=($trap_output)"
+	old_trap="${trap_output_tokens[2]}"
+	direnv_exit_trap="
+		$old_trap
+		$direnv_exit_trap
+	"
+fi
+trap -- "$direnv_exit_trap" EXIT
 `
+
+func (sh bash) Name() string {
+	return "bash"
+}
 
 func (sh bash) Hook() (string, error) {
 	return bashHook, nil
+}
+
+func (sh bash) ExportWithHooks(unload ShellExport, load ShellExport, hooksToRun map[string]string) (string, error) {
+	var builder strings.Builder
+
+	var processMarker = "_direnv_loaded"
+	if _, ok := hooksToRun[HOOK_SET_PROCESS_MARKER]; ok {
+		builder.WriteString(processMarker + "=true;")
+	}
+	if _, ok := hooksToRun[HOOK_UNSET_PROCESS_MARKER]; ok {
+		builder.WriteString("unset " + processMarker + ";")
+	}
+
+	if unloadHook, ok := hooksToRun[HOOK_UNLOAD]; ok {
+		builder.WriteString("eval " + sh.Escape(unloadHook) + ";")
+	}
+
+	if unload != nil {
+		unloadExport, err := sh.Export(unload)
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(unloadExport)
+	}
+	
+	if preLoadHook, ok := hooksToRun[HOOK_PRE_LOAD]; ok {
+		builder.WriteString("eval " + sh.Escape(preLoadHook) + ";")
+	}
+
+	if load != nil {
+		loadExport, err := sh.Export(load)
+		if err != nil {
+			return "", err
+		}
+		builder.WriteString(loadExport)
+	}
+
+	if postLoadHook, ok := hooksToRun[HOOK_POST_LOAD]; ok {
+		builder.WriteString("eval " + sh.Escape(postLoadHook) + ";")
+	}
+
+	return builder.String(), nil
 }
 
 func (sh bash) Export(e ShellExport) (string, error) {
@@ -49,16 +133,16 @@ func (sh bash) Dump(env Env) (string, error) {
 	return out, nil
 }
 
+func (sh bash) Escape(str string) string {
+	return BashEscape(str)
+}
+
 func (sh bash) export(key, value string) string {
-	return "export " + sh.escape(key) + "=" + sh.escape(value) + ";"
+	return "export " + sh.Escape(key) + "=" + sh.Escape(value) + ";"
 }
 
 func (sh bash) unset(key string) string {
-	return "unset " + sh.escape(key) + ";"
-}
-
-func (sh bash) escape(str string) string {
-	return BashEscape(str)
+	return "unset " + sh.Escape(key) + ";"
 }
 
 /*

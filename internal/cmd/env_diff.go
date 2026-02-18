@@ -85,20 +85,7 @@ func (diff *EnvDiff) Any() bool {
 // the target `shell`. The outputted string is then meant to be evaluated in
 // the target shell.
 func (diff *EnvDiff) ToShell(shell Shell) (string, error) {
-	e := make(ShellExport)
-
-	for key := range diff.Prev {
-		_, ok := diff.Next[key]
-		if !ok {
-			e.Remove(key)
-		}
-	}
-
-	for key, value := range diff.Next {
-		e.Add(key, value)
-	}
-
-	return shell.Export(e)
+	return shell.Export(diff.MakeShellExport())
 }
 
 // Patch applies the diff to the given env and returns a new env with the
@@ -131,6 +118,23 @@ func (diff *EnvDiff) Serialize() string {
 	return gzenv.Marshal(diff)
 }
 
+func (diff *EnvDiff) MakeShellExport() ShellExport {
+	e := make(ShellExport)
+
+	for key := range diff.Prev {
+		_, ok := diff.Next[key]
+		if !ok {
+			e.Remove(key)
+		}
+	}
+
+	for key, value := range diff.Next {
+		e.Add(key, value)
+	}
+
+	return e
+}
+
 //// Utils
 
 // IgnoredEnv returns true if the key should be ignored in environment diffs.
@@ -139,6 +143,9 @@ func IgnoredEnv(key string) bool {
 		return true
 	}
 	if strings.HasPrefix(key, "BASH_FUNC_") {
+		return true
+	}
+	if strings.HasPrefix(key, DIRENV_HOOK_PREFIX) {
 		return true
 	}
 	_, found := IgnoredKeys[key]
